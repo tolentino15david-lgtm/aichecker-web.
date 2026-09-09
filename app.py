@@ -7,10 +7,12 @@ import mimetypes
 import requests
 import csv
 import io
-from flask import Flask, render_template_string, request, redirect, url_for, flash, Response, session
+import statistics
+
+from flask import Flask, render_template, render_template_string, request, redirect, url_for, flash, Response, session
 from werkzeug.utils import secure_filename
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='.')
 app.secret_key = "yhelchecker_secret_key_navotas"
 DB_NAME = "yhelchecker.db"
 
@@ -31,7 +33,6 @@ def init_db():
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Submissions Table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS submissions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +49,6 @@ def init_db():
             )
         ''')
 
-        # Sections Table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS sections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +56,6 @@ def init_db():
             )
         ''')
 
-        # Answer Keys Table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS answer_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +64,6 @@ def init_db():
             )
         ''')
 
-        # Student Tokens Table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS student_tokens (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +74,6 @@ def init_db():
             )
         ''')
 
-        # Report Cards Table (MANUAL GRADING)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS student_report_cards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +89,6 @@ def init_db():
             )
         ''')
         
-        # Default Sections
         cursor.execute("INSERT OR IGNORE INTO sections (name) VALUES ('Grade 12 - STEM A')")
         cursor.execute("INSERT OR IGNORE INTO sections (name) VALUES ('Grade 12 - STEM B')")
         conn.commit()
@@ -188,9 +184,6 @@ def compute_deped_summary(submissions):
         })
     return summary
 
-# ---------------------------------------------------------
-# GEMINI VISION AI CALL
-# ---------------------------------------------------------
 def call_gemini_vision(image_path, answer_key):
     if not GEMINI_API_KEY:
         return {"success": False, "error": "Missing Gemini API Key."}
@@ -260,7 +253,7 @@ def call_gemini_vision(image_path, answer_key):
         return {"success": False, "error": str(e)}
 
 # ---------------------------------------------------------
-# HTML CSS STYLES & TEMPLATES
+# HTML STYLES & TEMPLATES
 # ---------------------------------------------------------
 COMMON_STYLE = '''
 <style>
@@ -292,7 +285,6 @@ COMMON_STYLE = '''
     .sidebar a:hover { background: rgba(255, 255, 255, 0.05); color: var(--cyan-glow); }
 
     .container { max-width: 1200px; margin: 30px auto; padding: 0 20px; }
-
     .glass-card { background: var(--card-bg); border: 1px solid var(--card-border); backdrop-filter: blur(16px); border-radius: 16px; padding: 25px; margin-bottom: 25px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37); }
 
     .tab-content { display: none; }
@@ -319,6 +311,10 @@ COMMON_STYLE = '''
     .remark-input { width: 120px; }
 
     .accordion-header { background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); padding: 15px 20px; border-radius: 12px; margin-bottom: 10px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+
+    .speech-box { background: rgba(157, 78, 221, 0.1); border: 1px dashed var(--purple-glow); padding: 15px; border-radius: 12px; margin-bottom: 20px; }
+    .listening-pulse { display: inline-block; width: 10px; height: 10px; background: #ef4444; border-radius: 50%; margin-right: 8px; animation: pulse 1s infinite; }
+    @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.3); } 100% { opacity: 1; transform: scale(1); } }
 </style>
 '''
 
@@ -326,7 +322,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>YhelChecker AI - Teacher Portal</title>
+    <title>HUSaYmetrics - Teacher Portal & Voice ECR</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -336,6 +332,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
     <div class="sidebar" id="sidebar">
         <h3 style="margin-top:0; color: var(--cyan-glow);">YHELCHECKER AI</h3>
         <hr style="border-color: var(--card-border); margin-bottom: 20px;">
+        <a href="#" onclick="switchTab('ecr-voice-tab')">🎙️ Electronic Class Record (Speech-to-Text)</a>
         <a href="#" onclick="switchTab('class-records')">📚 Class Records & Grading</a>
         <a href="#" onclick="switchTab('roster-tab')">👥 Class Roster & Tokens</a>
         <a href="#" onclick="switchTab('report-cards')">📝 Report Card Editor</a>
@@ -343,17 +340,17 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
         <a href="#" onclick="switchTab('deped-engine')">📊 DepEd Weighted Engine</a>
         <a href="#" onclick="switchTab('analytics-tab')">📈 Visual Analytics & Item Chart</a>
         <a href="#" onclick="switchTab('sections-tab')">🏷️ Manage Sections</a>
+        <a href="/section-analytics" class="btn btn-info">📊 View Section Analytics</a>
         <a href="#" onclick="switchTab('bulk-scanner')">⚡ Bulk Test Scanner</a>
         <a href="#" onclick="switchTab('keys-tab')">⚙️ Answer Key Settings</a>
     </div>
 
     <div class="nav-bar">
         <button class="burger-btn" onclick="toggleSidebar()">☰ <span>TEACHER PORTAL</span></button>
-        <span class="badge badge-gold">DepEd OMR & Order No. 8 Ready</span>
+        <span class="badge badge-gold">DepEd OMR & Voice ECR Active</span>
     </div>
 
     <div class="container">
-        
         {% with messages = get_flashed_messages() %}
           {% if messages %}
             <div style="background: rgba(16,185,129,0.2); border: 1px solid var(--green-neon); color: #6ee7b7; padding: 12px; border-radius: 8px; font-size: 13px; margin-bottom: 15px;">
@@ -362,13 +359,80 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
           {% endif %}
         {% endwith %}
 
-        <!-- TAB 1: CLASS RECORDS -->
-        <div id="class-records" class="tab-content active">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;">
-                <h2 style="margin:0;">Class Records Management</h2>
-                <form action="/teacher/clear-all" method="POST" onsubmit="return confirm('Sigurado ka bang gusto mong burahin ang LAHAT ng submissions?');">
-                    <button type="submit" class="btn btn-red">⚠️ CLEAR ALL SUBMISSIONS</button>
+        <!-- TAB 0: ELECTRONIC CLASS RECORD (ECR WITH SPEECH-TO-TEXT) -->
+        <div id="ecr-voice-tab" class="tab-content active">
+            <div class="glass-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                    <div>
+                        <h2 style="margin:0; color:var(--cyan-glow);">🎙️ Electronic Class Record (Speech-to-Text)</h2>
+                        <p style="color:var(--text-muted); font-size:13px; margin-top:5px;">Dictate student grades directly using your microphone. Tagalog / English support.</p>
+                    </div>
+                    <button type="button" class="btn btn-purple" onclick="toggleSpeechRecognition()" id="mic-toggle-btn" style="font-size:14px; padding:10px 18px;">
+                        🎤 Start Voice Dictation
+                    </button>
+                </div>
+
+                <div class="speech-box" id="speech-box" style="margin-top:20px;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span id="mic-indicator" style="display:none;" class="listening-pulse"></span>
+                        <strong id="speech-status" style="font-size:13px; color:var(--text-muted);">Status: Ready. Click button to speak.</strong>
+                    </div>
+                    <p style="font-size:11px; color:var(--text-muted); margin:8px 0 4px 0;"><strong>Halimbawa ng Command:</strong> "Juan Cruz Science 88 90 85 92" o kaya "Maria Santos Math 90 92"</p>
+                    <input type="text" id="speech-transcript" placeholder="Lalabas dito ang sasabihin mo..." readonly style="width:100%; padding:10px; background:rgba(0,0,0,0.5); border:1px solid var(--card-border); color:var(--cyan-glow); font-size:14px; border-radius:8px; box-sizing:border-box;">
+                </div>
+
+                <form action="/teacher/add-grade" method="POST" id="ecr-voice-form" style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-top:15px;">
+                    <div>
+                        <label style="font-size:11px; color:var(--text-muted);">Pangalan ng Estudyante</label>
+                        <input type="text" name="student_name" id="ecr_student_name" placeholder="Student Name" required class="remark-input" style="width:100%; box-sizing:border-box;">
+                    </div>
+                    <div>
+                        <label style="font-size:11px; color:var(--text-muted);">Section</label>
+                        <select name="section" required class="remark-input" style="width:100%; box-sizing:border-box;">
+                            {% for sec in sections %}<option value="{{ sec['name'] }}">{{ sec['name'] }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size:11px; color:var(--text-muted);">LRN (Optional)</label>
+                        <input type="text" name="lrn" id="ecr_lrn" placeholder="LRN" class="remark-input" style="width:100%; box-sizing:border-box;">
+                    </div>
+                    <div>
+                        <label style="font-size:11px; color:var(--text-muted);">Subject Name</label>
+                        <input type="text" name="subject_name" id="ecr_subject" placeholder="Subject (e.g. Research, Math)" required class="remark-input" style="width:100%; box-sizing:border-box;">
+                    </div>
+                    <div>
+                        <label style="font-size:11px; color:var(--text-muted);">Q1 Grade</label>
+                        <input type="number" step="0.01" name="q1" id="ecr_q1" placeholder="Q1 Grade" class="remark-input" style="width:100%; box-sizing:border-box;">
+                    </div>
+                    <div>
+                        <label style="font-size:11px; color:var(--text-muted);">Q2 Grade</label>
+                        <input type="number" step="0.01" name="q2" id="ecr_q2" placeholder="Q2 Grade" class="remark-input" style="width:100%; box-sizing:border-box;">
+                    </div>
+                    <div>
+                        <label style="font-size:11px; color:var(--text-muted);">Q3 Grade</label>
+                        <input type="number" step="0.01" name="q3" id="ecr_q3" placeholder="Q3 Grade" class="remark-input" style="width:100%; box-sizing:border-box;">
+                    </div>
+                    <div>
+                        <label style="font-size:11px; color:var(--text-muted);">Q4 Grade</label>
+                        <input type="number" step="0.01" name="q4" id="ecr_q4" placeholder="Q4 Grade" class="remark-input" style="width:100%; box-sizing:border-box;">
+                    </div>
+                    <div style="display:flex; align-items:flex-end;">
+                        <button type="submit" class="btn btn-green" style="width:100%; padding:10px;">💾 SAVE VOICE ECR RECORD</button>
+                    </div>
                 </form>
+            </div>
+        </div>
+
+        <!-- TAB 1: CLASS RECORDS -->
+        <div id="class-records" class="tab-content">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom: 20px;">
+                <h2 style="margin:0;">Class Records Management</h2>
+                <div style="display:flex; gap:10px;">
+                    <a href="/teacher/export-csv-all" class="btn btn-green">🌐 EXPORT ALL SECTIONS (UNIVERSAL CSV)</a>
+                    <form action="/teacher/clear-all" method="POST" onsubmit="return confirm('Sigurado ka bang gusto mong burahin ang LAHAT ng submissions sa lahat ng sections?');">
+                        <button type="submit" class="btn btn-red">⚠️ CLEAR ALL SUBMISSIONS</button>
+                    </form>
+                </div>
             </div>
             
             {% for sec in sections %}
@@ -391,8 +455,13 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
             <div class="accordion-body" id="sec-{{ loop.index }}">
                 <div class="glass-card">
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:15px;">
-                        <a href="/teacher/ai-check/{{ sec_name }}" class="btn btn-cyan">⚡ RUN AI CHECKER FOR PENDING</a>
-                        <a href="/teacher/export-csv/{{ sec_name }}" class="btn btn-green">📥 EXPORT CLASS GRADES CSV</a>
+                        <div>
+                            <a href="/teacher/ai-check/{{ sec_name }}" class="btn btn-cyan">⚡ RUN AI CHECKER FOR PENDING</a>
+                            <a href="/teacher/export-csv/{{ sec_name }}" class="btn btn-green">📥 EXPORT SECTION CSV</a>
+                        </div>
+                        <form action="/teacher/clear-section/{{ sec_name }}" method="POST" onsubmit="return confirm('Sigurado ka bang gusto mong burahin ang lahat ng submissions sa {{ sec_name }}?');">
+                            <button type="submit" class="btn btn-red" style="padding:6px 12px;">🗑️ CLEAR SECTION DATA</button>
+                        </form>
                     </div>
 
                     <div style="overflow-x:auto;">
@@ -434,8 +503,8 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
                                         <td>
                                             <button type="submit" class="btn btn-green" style="padding: 4px 8px;">SAVE</button>
                                     </form>
-                                            <form action="/teacher/delete-sub/{{ sub['id'] }}" method="POST" style="display:inline;" onsubmit="return confirm('Delete this record?');">
-                                                <button type="submit" class="btn btn-red" style="padding: 4px 8px;">X</button>
+                                            <form action="/teacher/delete-sub/{{ sub['id'] }}" method="POST" style="display:inline;" onsubmit="return confirm('Burahin ang submission na ito?');">
+                                                <button type="submit" class="btn btn-red" style="padding: 4px 8px;">🗑️</button>
                                             </form>
                                         </td>
                                 </tr>
@@ -450,7 +519,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
             {% endfor %}
         </div>
 
-        <!-- NEW TAB: CLASS ROSTER & TOKEN GENERATOR -->
+        <!-- TAB: CLASS ROSTER & TOKEN GENERATOR -->
         <div id="roster-tab" class="tab-content">
             <div class="glass-card">
                 <h3>👥 Class Roster & Student Token Generator</h3>
@@ -501,8 +570,8 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
                                 <td>{{ st['lrn'] or 'N/A' }}</td>
                                 <td><code style="color:var(--cyan-glow); font-weight:bold;">{{ st['secret_token'] }}</code></td>
                                 <td>
-                                    <form action="/teacher/delete-token/{{ st['id'] }}" method="POST" style="display:inline;" onsubmit="return confirm('Delete token for {{ st['student_name'] }}?');">
-                                        <button type="submit" class="btn btn-red" style="padding:2px 8px; font-size:10px;">X</button>
+                                    <form action="/teacher/delete-token/{{ st['id'] }}" method="POST" style="display:inline;" onsubmit="return confirm('Burahin ang token para kay {{ st['student_name'] }}?');">
+                                        <button type="submit" class="btn btn-red" style="padding:2px 8px; font-size:10px;">🗑️ Delete</button>
                                     </form>
                                 </td>
                             </tr>
@@ -516,7 +585,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
             </div>
         </div>
 
-        <!-- TAB 2: REPORT CARD EDITOR -->
+        <!-- TAB: REPORT CARD EDITOR -->
         <div id="report-cards" class="tab-content">
             <div class="glass-card">
                 <h3>📝 Manual Report Card Entry</h3>
@@ -527,21 +596,61 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
                     </select>
                     <input type="text" name="lrn" placeholder="LRN (Optional)" class="remark-input" style="width:auto;">
                     <input type="text" name="subject_name" placeholder="Subject Name (e.g. Science)" required class="remark-input" style="width:auto;">
-                    <input type="number" step="0.01" name="q1" placeholder="Q1 Grade (e.g. 89)" class="remark-input" style="width:auto;">
+                    <input type="number" step="0.01" name="q1" placeholder="Q1 Grade" class="remark-input" style="width:auto;">
                     <input type="number" step="0.01" name="q2" placeholder="Q2 Grade" class="remark-input" style="width:auto;">
                     <input type="number" step="0.01" name="q3" placeholder="Q3 Grade" class="remark-input" style="width:auto;">
                     <input type="number" step="0.01" name="q4" placeholder="Q4 Grade" class="remark-input" style="width:auto;">
-                    <button type="submit" class="btn btn-green">💾 SAVE SUBJECT GRADES</button>
+                    <button type="submit" class="btn btn-green">💾 SAVE SUBJECT GRADE</button>
                 </form>
+            </div>
+
+            <div class="glass-card">
+                <h3>📊 Existing Subject Grade Records</h3>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Student Name</th>
+                                <th>Section</th>
+                                <th>Subject</th>
+                                <th>Q1</th>
+                                <th>Q2</th>
+                                <th>Q3</th>
+                                <th>Q4</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for rc in raw_report_cards %}
+                            <tr>
+                                <td><strong>{{ rc['student_name'] }}</strong></td>
+                                <td>{{ rc['section'] }}</td>
+                                <td>{{ rc['subject_name'] }}</td>
+                                <td>{{ rc['q1'] or '-' }}</td>
+                                <td>{{ rc['q2'] or '-' }}</td>
+                                <td>{{ rc['q3'] or '-' }}</td>
+                                <td>{{ rc['q4'] or '-' }}</td>
+                                <td>
+                                    <form action="/teacher/delete-grade/{{ rc['id'] }}" method="POST" onsubmit="return confirm('Burahin ang subject grade na ito?');">
+                                        <button type="submit" class="btn btn-red" style="padding:2px 8px; font-size:10px;">🗑️ Delete</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="8" style="text-align:center; color:var(--text-muted);">Walang encoded subject grades.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
             </div>
             
             <div class="glass-card">
-                <h3>🖨️ View / Print Report Cards</h3>
+                <h3>🖨️ Printable Report Cards (SF9)</h3>
                 <ul>
                     {% for st in student_list %}
                     <li style="margin-bottom:10px;">
                         <strong>{{ st }}</strong> 
-                        <a href="/student/print-report/{{ st }}" target="_blank" class="btn btn-purple" style="margin-left:15px; font-size:10px;">PRINT CARD</a>
+                        <a href="/student/print-report/{{ st }}" target="_blank" class="btn btn-purple" style="margin-left:15px; font-size:10px;">🖨️ PRINT CARD</a>
                     </li>
                     {% else %}
                     <li style="color:var(--text-muted);">No manual report cards generated yet.</li>
@@ -550,7 +659,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
             </div>
         </div>
 
-        <!-- TAB 3: PRINT CENTER (QR & BUBBLESHEETS) -->
+        <!-- TAB: PRINT CENTER -->
         <div id="print-center" class="tab-content">
             <div class="glass-card" style="text-align:center;">
                 <h3>🖨️ Print 1-60 OMR Bubble Sheets</h3>
@@ -567,7 +676,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
             </div>
         </div>
 
-        <!-- TAB 4: DEPED ENGINE -->
+        <!-- TAB: DEPED ENGINE -->
         <div id="deped-engine" class="tab-content">
             <div class="glass-card">
                 <h3>📊 DepEd Order No. 8 Transmutation Grade Sheet</h3>
@@ -603,7 +712,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
             </div>
         </div>
 
-        <!-- TAB 5: CHART.JS VISUAL ANALYTICS -->
+        <!-- TAB: CHART.JS ANALYTICS -->
         <div id="analytics-tab" class="tab-content">
             <div class="glass-card">
                 <h3>📈 Item Analysis & Error Frequency</h3>
@@ -640,7 +749,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
             </div>
         </div>
 
-        <!-- TAB 6: SECTIONS -->
+        <!-- TAB: SECTIONS -->
         <div id="sections-tab" class="tab-content">
             <div class="glass-card">
                 <h3>🏷️ Section Management</h3>
@@ -648,15 +757,21 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
                     <input type="text" name="section_name" placeholder="New Section Name (e.g., Grade 12 - STEM C)" required style="flex:1; padding: 10px; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.3); color: white;">
                     <button type="submit" class="btn btn-cyan">+ ADD SECTION</button>
                 </form>
-                <ul>
+                
+                <div style="display:flex; flex-direction:column; gap:10px;">
                     {% for sec in sections %}
-                    <li style="margin-bottom: 8px;"><strong>{{ sec['name'] }}</strong></li>
+                    <div style="display:flex; align-items:center; justify-content:space-between; background:rgba(255,255,255,0.03); padding:10px 15px; border-radius:8px; border:1px solid var(--card-border);">
+                        <strong>{{ sec['name'] }}</strong>
+                        <form action="/teacher/delete-section/{{ sec['id'] }}" method="POST" onsubmit="return confirm('Sigurado ka bang buburahin ang section na ito?');">
+                            <button type="submit" class="btn btn-red" style="padding:4px 10px; font-size:11px;">🗑️ Delete Section</button>
+                        </form>
+                    </div>
                     {% endfor %}
-                </ul>
+                </div>
             </div>
         </div>
 
-        <!-- TAB 7: BULK SCANNER -->
+        <!-- TAB: BULK SCANNER -->
         <div id="bulk-scanner" class="tab-content">
             <div class="glass-card">
                 <h3>⚡ Bulk Test Paper Scanner</h3>
@@ -687,7 +802,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
             </div>
         </div>
 
-        <!-- TAB 8: SETTINGS & ANSWER KEYS -->
+        <!-- TAB: SETTINGS & ANSWER KEYS -->
         <div id="keys-tab" class="tab-content">
             <div class="glass-card">
                 <h3>⚙️ Master Answer Keys Settings</h3>
@@ -733,6 +848,102 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
         function toggleAccordion(id) {
             const body = document.getElementById(id);
             body.style.display = (body.style.display === 'none' || body.style.display === '') ? 'block' : 'none';
+        }
+
+        // -----------------------------------------------------
+        // SPEECH TO TEXT ENGINE FOR ECR
+        // -----------------------------------------------------
+        let isListening = false;
+        let recognition = null;
+
+        function toggleSpeechRecognition() {
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                alert('Hindi supported ang Speech-to-Text sa browser na ito. Pakigamit ang Google Chrome.');
+                return;
+            }
+
+            if (isListening) {
+                stopSpeech();
+            } else {
+                startSpeech();
+            }
+        }
+
+        function startSpeech() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'fil-PH'; // Tagalog/Filipino language dictation
+            recognition.continuous = false;
+            recognition.interimResults = false;
+
+            recognition.onstart = function() {
+                isListening = true;
+                document.getElementById('mic-indicator').style.display = 'inline-block';
+                document.getElementById('speech-status').innerText = '🎙️ Nakikinig na... Magsalita ngayon!';
+                document.getElementById('mic-toggle-btn').innerText = '⏹️ Stop Dictation';
+            };
+
+            recognition.onresult = function(event) {
+                const text = event.results[0][0].transcript;
+                document.getElementById('speech-transcript').value = text;
+                parseSpeechToForm(text);
+            };
+
+            recognition.onerror = function(event) {
+                document.getElementById('speech-status').innerText = '❌ Error: ' + event.error;
+                stopSpeech();
+            };
+
+            recognition.onend = function() {
+                stopSpeech();
+            };
+
+            recognition.start();
+        }
+
+        function stopSpeech() {
+            isListening = false;
+            if (recognition) recognition.stop();
+            document.getElementById('mic-indicator').style.display = 'none';
+            document.getElementById('speech-status').innerText = 'Status: Ready. Click button to speak.';
+            document.getElementById('mic-toggle-btn').innerText = '🎤 Start Voice Dictation';
+        }
+
+        function parseSpeechToForm(speechText) {
+            // Extract numerical grades from spoken text
+            const numbers = speechText.match(/\d+(\.\d+)?/g);
+            if (numbers) {
+                if (numbers[0]) document.getElementById('ecr_q1').value = numbers[0];
+                if (numbers[1]) document.getElementById('ecr_q2').value = numbers[1];
+                if (numbers[2]) document.getElementById('ecr_q3').value = numbers[2];
+                if (numbers[3]) document.getElementById('ecr_q4').value = numbers[3];
+            }
+
+            // Remove numbers to isolate Name & Subject
+            let cleanText = speechText.replace(/\d+(\.\d+)?/g, '').trim();
+            
+            // Standard Subjects list check
+            const knownSubjects = ['Math', 'Science', 'English', 'Filipino', 'Research', 'PE', 'History', 'ICT', 'Empowerment Technologies'];
+            let foundSubject = '';
+
+            for (let subj of knownSubjects) {
+                const regex = new RegExp('\\b' + subj + '\\b', 'i');
+                if (regex.test(cleanText)) {
+                    foundSubject = subj;
+                    cleanText = cleanText.replace(regex, '').trim();
+                    break;
+                }
+            }
+
+            if (foundSubject) {
+                document.getElementById('ecr_subject').value = foundSubject;
+            } else if (!document.getElementById('ecr_subject').value) {
+                document.getElementById('ecr_subject').value = 'General Subject';
+            }
+
+            if (cleanText) {
+                document.getElementById('ecr_student_name').value = cleanText;
+            }
         }
 
         document.addEventListener("DOMContentLoaded", function() {
@@ -799,7 +1010,6 @@ STUDENT_PORTAL_HTML = COMMON_STYLE + '''
 <head><title>Student Portal - ESP32 Offline Access</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body style="display:flex; justify-content:center; align-items:center; min-height:100vh; padding: 20px 0; box-sizing: border-box;">
     <div style="max-width:480px; width:100%;">
-        
         {% with messages = get_flashed_messages() %}
           {% if messages %}
             <div style="background: rgba(16,185,129,0.2); border: 1px solid var(--green-neon); color: #6ee7b7; padding: 12px; border-radius: 8px; font-size: 13px; margin-bottom: 15px; text-align: center;">
@@ -808,7 +1018,6 @@ STUDENT_PORTAL_HTML = COMMON_STYLE + '''
           {% endif %}
         {% endwith %}
 
-        <!-- FORM 1: VIEW CARD VIA TOKEN -->
         <div class="glass-card" style="text-align:center;">
             <h2 style="color:var(--cyan-glow); margin-top:0;">Student Grade Portal</h2>
             <p style="font-size:13px; color:var(--text-muted);">Enter your 8-character Secret Token or scan your QR Code to view your Report Card.</p>
@@ -818,7 +1027,6 @@ STUDENT_PORTAL_HTML = COMMON_STYLE + '''
             </form>
         </div>
 
-        <!-- FORM 2: OFFLINE STUDENT TEST PAPER UPLOAD (ESP32 HOTSPOT) -->
         <div class="glass-card">
             <h3 style="color:var(--purple-glow); margin-top:0; text-align:center;">📤 Upload Test Paper (ESP32 Hotspot)</h3>
             <p style="font-size:12px; color:var(--text-muted); text-align:center;">Kahit offline, pwedeng mag-upload ng kuha ng iyong test paper habang nakakonekta sa ESP32 Hotspot.</p>
@@ -854,7 +1062,6 @@ STUDENT_PORTAL_HTML = COMMON_STYLE + '''
                 <button type="submit" class="btn btn-purple" style="font-size:14px; padding:10px; margin-top:10px;">⚡ PASS TEST PAPER</button>
             </form>
         </div>
-
     </div>
 </body>
 </html>
@@ -913,75 +1120,200 @@ PRINTABLE_BUBBLESHEET_HTML = '''
 
 REPORT_CARD_HTML = '''
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Learner's Performance Report</title>
+    <meta charset="UTF-8">
+    <title>DepEd School Form 9 (SF9) - Learner's Performance Report</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; color: #000; }
-        .report-card { width: 100%; max-width: 800px; margin: 0 auto; border: 1px solid #ccc; padding: 25px; }
-        .header { text-align: center; line-height: 1.2; margin-bottom:20px; }
-        .header h4, .header h3, .header h5 { margin: 3px 0; font-weight: bold; }
-        .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; font-size: 13px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { border: 1px solid #000; padding: 8px; text-align: center; font-size: 12px; }
-        th { background-color: #dbeafe; }
-        td.left { text-align: left; font-weight: bold; }
-        @media print { .no-print { display: none; } .report-card { border: none; } }
+        @page { size: A4 portrait; margin: 8mm; }
+        body { font-family: 'Arial', sans-serif; color: #000; margin: 0; padding: 10px; font-size: 10px; background: #f3f4f6; }
+        .no-print { text-align: center; margin-bottom: 15px; background: #fff; padding: 10px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .btn-print { padding: 10px 24px; background: #059669; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 6px; font-size: 14px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .btn-print:hover { background: #047857; }
+        .edit-hint { font-size: 12px; color: #4b5563; margin-top: 5px; font-style: italic; }
+        
+        [contenteditable="true"]:hover { background-color: #fef08a !important; outline: 1px dashed #ca8a04; cursor: text; }
+        [contenteditable="true"]:focus { background-color: #fef9c3 !important; outline: 2px solid #eab308; }
+
+        .sf9-card { width: 100%; max-width: 960px; margin: 0 auto; border: 2px solid #000; padding: 15px; box-sizing: border-box; background: white; }
+        .header-section { text-align: center; line-height: 1.2; margin-bottom: 8px; }
+        .header-section h5 { margin: 1px 0; font-size: 10px; font-weight: normal; text-transform: uppercase; }
+        .header-section h4 { margin: 2px 0; font-size: 12px; font-weight: bold; text-transform: uppercase; }
+        .header-section h3 { margin: 4px 0; font-size: 14px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
+        
+        .info-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 4px 12px; margin-bottom: 8px; font-size: 10px; border-bottom: 1.5px solid #000; padding-bottom: 6px; }
+        .info-item { display: flex; align-items: flex-end; }
+        .info-label { font-weight: bold; white-space: nowrap; margin-right: 4px; }
+        .info-value { border-bottom: 1px solid #000; flex-grow: 1; text-align: center; font-weight: bold; min-height: 14px; }
+
+        .letter-box { font-size: 9px; margin-bottom: 8px; border: 1px solid #666; padding: 5px; line-height: 1.2; background-color: #fafafa; }
+        .main-layout { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; }
+        
+        table.sf9-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 9.5px; }
+        table.sf9-table th, table.sf9-table td { border: 1px solid #000; padding: 3px 4px; text-align: center; }
+        table.sf9-table th { background-color: #f3f4f6; font-weight: bold; text-transform: uppercase; font-size: 8.5px; }
+        table.sf9-table td.left { text-align: left; padding-left: 5px; font-weight: 500; }
+
+        .section-title { font-weight: bold; text-transform: uppercase; background: #e5e7eb; border: 1px solid #000; padding: 2px 5px; font-size: 9px; text-align: center; margin-bottom: 4px; letter-spacing: 0.5px; }
+        .sign-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; text-align: center; margin-top: 10px; font-size: 9px; }
+        .sign-line { border-top: 1px solid #000; margin-top: 20px; font-weight: bold; padding-top: 2px; }
+        .remarks-box { border: 1px solid #000; padding: 4px; font-size: 8.5px; min-height: 35px; margin-bottom: 6px; }
+
+        @media print {
+            .no-print { display: none !important; }
+            body { padding: 0; background: white; }
+            .sf9-card { border: none; padding: 0; width: 100%; }
+            [contenteditable="true"]:hover, [contenteditable="true"]:focus { background-color: transparent !important; outline: none !important; }
+        }
     </style>
 </head>
 <body>
-<div class="no-print" style="text-align:right; max-width:800px; margin:0 auto 15px auto;">
-    <button onclick="window.print()" style="padding:10px 15px; background:#10b981; color:white; border:none; cursor:pointer; font-weight:bold;">🖨️ Print Report</button>
+
+<div class="no-print">
+    <button onclick="window.print()" class="btn-print">🖨️ PRINT SCHOOL FORM 9 (SF9)</button>
+    <div class="edit-hint">💡 <strong>Tip:</strong> Pwede mong i-click at baguhin ang anumang text sa report card na ito bago i-print!</div>
 </div>
-<div class="report-card">
-    <div class="header">
-        <h5>Schools Division Office</h5>
-        <h3>LEARNER'S PERFORMANCE REPORT</h3>
-        <p>S.Y. 2026–2027</p>
+
+<div class="sf9-card">
+    <div class="header-section">
+        <h5>Republic of the Philippines</h5>
+        <h5>Department of Education</h5>
+        <h5 contenteditable="true">REGION / SCHOOLS DIVISION OFFICE</h5>
+        <h4 contenteditable="true">ABC NATIONAL HIGH SCHOOL - SENIOR HIGH SCHOOL</h4>
+        <h3>LEARNER'S PERFORMANCE REPORT (SF9)</h3>
+        <p style="margin:2px 0; font-weight:bold; font-size:10px;">School Year <span contenteditable="true">2026–2027</span></p>
     </div>
+
     <div class="info-grid">
-        <div><strong>Name:</strong> {{ st_name }}</div>
-        <div><strong>Section:</strong> {{ st_section }}</div>
-        <div><strong>LRN:</strong> {{ st_lrn or 'N/A' }}</div>
-        <div><strong>Track:</strong> {{ st_track }}</div>
+        <div class="info-item"><span class="info-label">Name:</span><span class="info-value" contenteditable="true">{{ st_name }}</span></div>
+        <div class="info-item"><span class="info-label">Age:</span><span class="info-value" contenteditable="true">17</span></div>
+        <div class="info-item"><span class="info-label">Sex:</span><span class="info-value" contenteditable="true">Male</span></div>
+        <div class="info-item"><span class="info-label">LRN:</span><span class="info-value" contenteditable="true">{{ st_lrn or '' }}</span></div>
+        <div class="info-item"><span class="info-label">Grade Level:</span><span class="info-value" contenteditable="true">12</span></div>
+        <div class="info-item"><span class="info-label">Section:</span><span class="info-value" contenteditable="true">{{ st_section }}</span></div>
+        <div class="info-item" style="grid-column: span 3;"><span class="info-label">Track / Strand (SHS):</span><span class="info-value" contenteditable="true">{{ st_track }}</span></div>
     </div>
-    <table>
-        <thead>
-            <tr>
-                <th rowspan="2" style="width: 40%;">Learning Areas</th>
-                <th colspan="4">Quarter</th>
-                <th rowspan="2">Final Grade</th>
-                <th rowspan="2">Remarks</th>
-            </tr>
-            <tr><th>1</th><th>2</th><th>3</th><th>4</th></tr>
-        </thead>
-        <tbody>
-            {% set ns = namespace(total=0, count=0) %}
-            {% for g in grades %}
-                {% set valid_q = [] %}
-                {% if g.q1 %}{% set _ = valid_q.append(g.q1) %}{% endif %}
-                {% if g.q2 %}{% set _ = valid_q.append(g.q2) %}{% endif %}
-                {% if g.q3 %}{% set _ = valid_q.append(g.q3) %}{% endif %}
-                {% if g.q4 %}{% set _ = valid_q.append(g.q4) %}{% endif %}
-                {% set final_g = (valid_q | sum / valid_q | length) | round if valid_q|length > 0 else 0 %}
-                {% if final_g > 0 %}{% set ns.total = ns.total + final_g %}{% set ns.count = ns.count + 1 %}{% endif %}
-            <tr>
-                <td class="left">{{ g.subject_name }}</td>
-                <td>{{ g.q1 or '' }}</td><td>{{ g.q2 or '' }}</td><td>{{ g.q3 or '' }}</td><td>{{ g.q4 or '' }}</td>
-                <td><strong>{{ final_g if final_g > 0 else '' }}</strong></td>
-                <td style="color:{{ 'green' if final_g >= 75 else 'red' }}; font-weight:bold;">
-                    {% if final_g > 0 %}{{ 'Passed' if final_g >= 75 else 'Failed' }}{% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-            <tr style="background:#f8fafc; font-weight:bold;">
-                <td colspan="5" class="left" style="text-align:right;">General Average</td>
-                <td>{{ (ns.total / ns.count)|round(2) if ns.count > 0 else '' }}</td>
-                <td>{% if ns.count > 0 %}{{ 'Passed' if (ns.total / ns.count) >= 75 else 'Failed' }}{% endif %}</td>
-            </tr>
-        </tbody>
-    </table>
+
+    <div class="letter-box">
+        <strong>Dear Parents/Guardians:</strong><br>
+        This Performance Report presents your child's progress and achievement in the different learning areas. The school welcomes you to reach out should you wish to know more about your child's learning and performance.
+    </div>
+
+    <div class="main-layout">
+        <div>
+            <div class="section-title">LEARNING PROGRESS AND ACHIEVEMENT</div>
+            <table class="sf9-table">
+                <thead>
+                    <tr>
+                        <th rowspan="2" style="width: 44%;">Learning Areas</th>
+                        <th colspan="2">1st Semester</th>
+                        <th colspan="2">2nd Semester</th>
+                        <th rowspan="2" style="width: 13%;">Final Grade</th>
+                        <th rowspan="2" style="width: 15%;">Remarks</th>
+                    </tr>
+                    <tr>
+                        <th style="width: 7%;">Q1</th>
+                        <th style="width: 7%;">Q2</th>
+                        <th style="width: 7%;">Q3</th>
+                        <th style="width: 7%;">Q4</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% set ns = namespace(total=0, count=0) %}
+                    {% for g in grades %}
+                        {% set valid_q = [] %}
+                        {% if g.q1 %}{% set _ = valid_q.append(g.q1) %}{% endif %}
+                        {% if g.q2 %}{% set _ = valid_q.append(g.q2) %}{% endif %}
+                        {% if g.q3 %}{% set _ = valid_q.append(g.q3) %}{% endif %}
+                        {% if g.q4 %}{% set _ = valid_q.append(g.q4) %}{% endif %}
+                        {% set final_g = (valid_q | sum / valid_q | length) | round if valid_q|length > 0 else 0 %}
+                        {% if final_g > 0 %}
+                            {% set ns.total = ns.total + final_g %}
+                            {% set ns.count = ns.count + 1 %}
+                        {% endif %}
+                    <tr>
+                        <td class="left" contenteditable="true">{{ g.subject_name }}</td>
+                        <td contenteditable="true">{{ g.q1 or '' }}</td>
+                        <td contenteditable="true">{{ g.q2 or '' }}</td>
+                        <td contenteditable="true">{{ g.q3 or '' }}</td>
+                        <td contenteditable="true">{{ g.q4 or '' }}</td>
+                        <td contenteditable="true"><strong>{{ final_g if final_g > 0 else '' }}</strong></td>
+                        <td contenteditable="true" style="color:{{ 'green' if final_g >= 75 else 'red' }}; font-weight:bold;">
+                            {% if final_g > 0 %}{{ 'Passed' if final_g >= 75 else 'Failed' }}{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    <tr style="background:#f8fafc; font-weight:bold;">
+                        <td class="left">General Average</td>
+                        <td colspan="4"></td>
+                        <td contenteditable="true"><strong>{{ (ns.total / ns.count)|round(2) if ns.count > 0 else '' }}</strong></td>
+                        <td contenteditable="true" style="color:{{ 'green' if (ns.total / ns.count) >= 75 else 'red' }};">
+                            {% if ns.count > 0 %}{{ 'Passed' if (ns.total / ns.count) >= 75 else 'Failed' }}{% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="section-title">PERFORMANCE DESCRIPTORS</div>
+            <table class="sf9-table">
+                <thead>
+                    <tr>
+                        <th>Grading Scale</th>
+                        <th>Descriptor</th>
+                        <th>Remarks</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>90 – 100</td><td>Advancing</td><td>Passed</td></tr>
+                    <tr><td>80 – 89</td><td>Benchmarking</td><td>Passed</td></tr>
+                    <tr><td>75 – 79</td><td>Connecting</td><td>Passed</td></tr>
+                    <tr><td>65 – 74</td><td>Developing</td><td>Failed</td></tr>
+                    <tr><td>0 – 64</td><td>Emerging</td><td>Failed</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div>
+            <div class="section-title">REPORT ON ATTENDANCE</div>
+            <table class="sf9-table" style="font-size: 8px;">
+                <thead>
+                    <tr>
+                        <th>Month</th>
+                        <th>Jun</th><th>Jul</th><th>Aug</th><th>Sep</th><th>Oct</th><th>Nov</th><th>Dec</th><th>Jan</th><th>Feb</th><th>Mar</th><th>Apr</th><th>Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td class="left" style="font-weight:bold;">No. Class Days</td>{% for _ in range(12) %}<td contenteditable="true"></td>{% endfor %}</tr>
+                    <tr><td class="left" style="font-weight:bold;">No. Present</td>{% for _ in range(12) %}<td contenteditable="true"></td>{% endfor %}</tr>
+                    <tr><td class="left" style="font-weight:bold;">No. Absent</td>{% for _ in range(12) %}<td contenteditable="true"></td>{% endfor %}</tr>
+                </tbody>
+            </table>
+
+            <div class="section-title">TEACHER'S COMMENTS / REMARKS</div>
+            <div class="remarks-box" contenteditable="true"><strong>Q1 / Q2:</strong> </div>
+            <div class="remarks-box" contenteditable="true"><strong>Q3 / Q4:</strong> </div>
+
+            <div class="section-title">CERTIFICATE OF TRANSFER</div>
+            <p style="font-size: 8.5px; margin: 2px 0;">This is to certify that the above-named learner has satisfactorily completed the requirements for the grade level indicated.</p>
+            <div style="font-size:8.5px; margin-top:4px;">
+                <p style="margin:2px 0;"><strong>Admitted to Grade:</strong> <span contenteditable="true">_____</span></p>
+                <p style="margin:2px 0;"><strong>Eligible for Admission to Grade:</strong> <span contenteditable="true">_____</span></p>
+            </div>
+
+            <div class="sign-grid">
+                <div><div class="sign-line" contenteditable="true">Class Adviser</div></div>
+                <div><div class="sign-line" contenteditable="true">School Head</div></div>
+            </div>
+            
+            <div style="margin-top: 10px; text-align: center;">
+                <div style="border-top: 1px solid #000; width: 80%; margin: 15px auto 2px auto;"></div>
+                <span style="font-size: 8px; font-weight: bold; text-transform: uppercase;">Parent / Guardian Signature</span>
+            </div>
+        </div>
+
+    </div>
 </div>
+
 </body>
 </html>
 '''
@@ -1031,6 +1363,9 @@ def teacher_dashboard():
         cursor.execute('SELECT DISTINCT student_name FROM student_report_cards')
         student_list = [r['student_name'] for r in cursor.fetchall()]
 
+        cursor.execute('SELECT * FROM student_report_cards ORDER BY student_name, subject_name')
+        raw_report_cards = cursor.fetchall()
+
         cursor.execute('SELECT * FROM student_tokens ORDER BY section, student_name')
         all_tokens = cursor.fetchall()
 
@@ -1045,6 +1380,7 @@ def teacher_dashboard():
         frequency_data=freq_data,
         deped_summary=deped_summary,
         student_list=student_list,
+        raw_report_cards=raw_report_cards,
         all_tokens=all_tokens
     )
 
@@ -1190,6 +1526,15 @@ def manage_sections():
                 flash("⚠️ Umiiral na ang section name na ito.")
     return redirect(url_for('teacher_dashboard'))
 
+@app.route('/teacher/delete-section/<int:sec_id>', methods=['POST'])
+def delete_section(sec_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM sections WHERE id = ?', (sec_id,))
+        conn.commit()
+    flash("✅ Section deleted successfully.")
+    return redirect(url_for('teacher_dashboard'))
+
 @app.route('/teacher/update-score/<int:sub_id>', methods=['POST'])
 def update_score(sub_id):
     score = request.form.get('score')
@@ -1226,6 +1571,15 @@ def clear_all():
     flash("Lahat ng submissions ay binura na.")
     return redirect(url_for('teacher_dashboard'))
 
+@app.route('/teacher/clear-section/<section_name>', methods=['POST'])
+def clear_section(section_name):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM submissions WHERE section = ?', (section_name,))
+        conn.commit()
+    flash(f"✅ Lahat ng submissions sa {section_name} ay nabura na.")
+    return redirect(url_for('teacher_dashboard'))
+
 @app.route('/teacher/export-csv/<section_name>')
 def export_csv(section_name):
     with get_db() as conn:
@@ -1245,6 +1599,27 @@ def export_csv(section_name):
         output.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": f"attachment;filename={section_name}_grades.csv"}
+    )
+
+@app.route('/teacher/export-csv-all')
+def export_csv_all():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM submissions ORDER BY section, student_name')
+        rows = cursor.fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Student Name', 'LRN', 'Section', 'Category', 'Score', 'Total', 'Errors', 'Status', 'Token'])
+
+    for r in rows:
+        writer.writerow([r['student_name'], r['lrn'], r['section'], r['category'], r['score'], r['total_questions'], r['error_details'], r['status'], r['secret_token']])
+
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=all_sections_grades.csv"}
     )
 
 # --- STUDENT AND PRINT ROUTES ---
@@ -1335,6 +1710,15 @@ def add_grade():
     flash(f"✅ Grade saved for {st_name} - {subj}")
     return redirect(url_for('teacher_dashboard'))
 
+@app.route('/teacher/delete-grade/<int:grade_id>', methods=['POST'])
+def delete_grade(grade_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM student_report_cards WHERE id = ?', (grade_id,))
+        conn.commit()
+    flash("✅ Subject grade entry deleted.")
+    return redirect(url_for('teacher_dashboard'))
+
 @app.route('/teacher/print-bubblesheet')
 def print_bubblesheet():
     return render_template_string(PRINTABLE_BUBBLESHEET_HTML)
@@ -1347,7 +1731,42 @@ def print_qr(section_name):
         tokens = cursor.fetchall()
     return render_template_string(QR_PRINT_HTML, tokens=tokens)
 
+@app.route('/section-analytics')
+def section_analytics():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT section, score FROM submissions WHERE score IS NOT NULL")
+        rows = cursor.fetchall()
+
+    grouped_data = {}
+    for section, score in rows:
+        if section and score is not None:
+            try:
+                val = float(score)
+                if section not in grouped_data:
+                    grouped_data[section] = []
+                grouped_data[section].append(val)
+            except (ValueError, TypeError):
+                continue
+
+    stats = []
+    for sec_name, scores in grouped_data.items():
+        if len(scores) > 0:
+            mean_val = round(statistics.mean(scores), 2)
+            stdev_val = round(statistics.stdev(scores), 2) if len(scores) > 1 else 0.0
+            
+            stats.append({
+                'section': sec_name,
+                'count': len(scores),
+                'mean': mean_val,
+                'stdev': stdev_val,
+                'min': min(scores),
+                'max': max(scores)
+            })
+
+    return render_template('section_analytics.html', stats=stats)
+
 
 if __name__ == '__main__':
-    print("Starting YhelChecker AI Server...")
+    print("Starting YhelChecker AI & Voice ECR Server...")
     app.run(debug=True, host='0.0.0.0', port=5000)

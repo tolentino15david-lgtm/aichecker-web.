@@ -9,7 +9,6 @@ import csv
 import io
 import statistics
 from google import genai
-from google.genai import types
 
 from flask import Flask, render_template, render_template_string, request, redirect, url_for, flash, Response, session
 from werkzeug.utils import secure_filename
@@ -157,7 +156,7 @@ def compute_deped_summary(submissions):
             continue
         key = (sub['student_name'], sub['section'])
         if key not in students:
-            students[key] = {'WW': [], 'PT': [], 'QA': []}
+            students[key] = {'WW': [], 'PT': [], 'S1': [], 'S2': [], 'FINAL': []}
         
         cat = sub['category']
         if cat in students[key]:
@@ -168,7 +167,8 @@ def compute_deped_summary(submissions):
     for (name, section), grades in students.items():
         ww_pct = round(sum(grades['WW']) / len(grades['WW']), 1) if grades['WW'] else 0.0
         pt_pct = round(sum(grades['PT']) / len(grades['PT']), 1) if grades['PT'] else 0.0
-        qa_pct = round(sum(grades['QA']) / len(grades['QA']), 1) if grades['QA'] else 0.0
+        summative_values = grades['S1'] + grades['S2'] + grades['FINAL']
+        qa_pct = round(sum(summative_values) / len(summative_values), 1) if summative_values else 0.0
 
         weighted = round((ww_pct * 0.30) + (pt_pct * 0.50) + (qa_pct * 0.20), 1)
         transmuted = round(60 + (weighted * 0.4), 0) if weighted > 0 else 60
@@ -187,147 +187,72 @@ def compute_deped_summary(submissions):
     return summary
 
 def call_gemini_vision(image_path, answer_key):
-    """Grade one uploaded test paper using the current Google GenAI SDK."""
     if not GEMINI_API_KEY:
-        return {
-            "success": False,
-            "error": "Missing Gemini API Key. Set the GEMINI_API_KEY environment variable."
-        }
+        return {"success": False, "error": "Missing Gemini API Key."}
 
     if not answer_key:
-        return {
-            "success": False,
-            "error": "Empty Answer Key. Mag-set muna ng key sa Settings."
-        }
+        return {"success": False, "error": "Empty Answer Key. Mag-set muna ng key sa Settings."}
 
-    if not image_path or not os.path.exists(image_path):
-        return {
-            "success": False,
-            "error": f"Image file not found at path: {image_path}"
-        }
+    if not os.path.exists(image_path):
+        return {"success": False, "error": f"Image file not found at path: {image_path}"}
 
     mime_type, _ = mimetypes.guess_type(image_path)
-    if not mime_type or not mime_type.startswith("image/"):
+    if not mime_type:
         mime_type = "image/jpeg"
 
     formatted_key = normalize_answer_key(answer_key)
 
-    prompt = f"""
-You are an advanced Optical Mark Recognition (OMR) and handwriting evaluator.
-
-Analyze the student's test paper image and compare the student's answers with
-this Master Answer Key:
-
-{formatted_key}
-
-Instructions:
-1. Extract the Student Name from the header if visible.
-2. Extract the LRN from the header if visible.
-3. Read all shaded A/B/C/D choices or handwritten answers.
-4. Compare every answer against the Master Answer Key.
-5. Count the total number of correct answers.
-6. The test contains exactly 60 items.
-7. List ONLY the item numbers that are incorrect, unanswered, double-shaded,
-   or otherwise invalid.
-
-Return JSON ONLY using exactly this structure:
-{{
-    "student_name": null,
-    "lrn": null,
-    "score": 0,
-    "total": 60,
-    "errors": ""
-}}
-
-Rules:
-- "score" must be an integer from 0 to 60.
-- "total" must always be 60.
-- "errors" must be a comma-separated list of item numbers.
-- If there are no errors, return an empty string for "errors".
-- Do not include Markdown or explanations outside the JSON.
-"""
-
     try:
-        # Read the image directly; the current SDK can send image bytes as a Part.
         with open(image_path, "rb") as img_file:
-            image_bytes = img_file.read()
+            img_b64 = base64.b64encode(img_file.read()).decode('utf-8')
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
+        
+        prompt = f"""
+        You are an advanced Optical Mark Recognition (OMR) and handwriting evaluator.
+        Compare the student's answers (either handwritten text or shaded A/B/C/D bubbles on a 60-item sheet) with this Master Answer Key:
+        "{formatted_key}"
 
-        image_part = types.Part.from_bytes(
-            data=image_bytes,
-            mime_type=mime_type
-        )
+        Instructions:
+        1. Extract the Student Name and LRN in the header if visible.
+        2. Read all shaded choices or handwritten answers.
+        3. Count total correct answers based on the Master Key as 'score'.
+        4. List ONLY the item numbers that were incorrect, missed, or double-shaded as a comma-separated string (e.g. "1, 4, 12").
 
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=[image_part, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0,
-                max_output_tokens=2000
-            )
-        )
+        Return JSON ONLY in this exact structure:
+        {{
+            "student_name": "<Extracted Name or null>",
+            "lrn": "<Extracted LRN or null>",
+            "score": <integer score>,
+            "total": 60,
+            "errors": "<comma-separated wrong item numbers>"
+        }}
+        """
 
-        text_response = (response.text or "").strip()
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime_type, "data": img_b64}}
+                ]
+            }],
+            "generationConfig": {"response_mime_type": "application/json"}
+        }
 
-        if not text_response:
-            return {
-                "success": False,
-                "error": "Gemini returned an empty response."
-            }
+        res = requests.post(url, json=payload, timeout=30)
+        res_data = res.json()
+        
+        if 'error' in res_data:
+            return {"success": False, "error": res_data['error'].get('message', 'API Request Failed')}
 
-        # JSON mode should already return JSON, but keep a safe fallback for
-        # responses that contain extra text.
-        try:
-            parsed = json.loads(text_response)
-        except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", text_response, re.DOTALL)
-            if not match:
-                return {
-                    "success": False,
-                    "error": f"Gemini returned invalid JSON: {text_response[:500]}"
-                }
-            parsed = json.loads(match.group(0))
-
-        # Normalize/validate values expected by teacher_ai_check().
-        try:
-            score = int(parsed.get("score", 0))
-        except (TypeError, ValueError):
-            return {
-                "success": False,
-                "error": "Gemini returned an invalid score."
-            }
-
-        try:
-            total = int(parsed.get("total", 60))
-        except (TypeError, ValueError):
-            total = 60
-
-        if not 0 <= score <= 60:
-            return {
-                "success": False,
-                "error": f"Gemini returned an invalid score: {score}"
-            }
-
-        if total != 60:
-            total = 60
-
-        parsed["student_name"] = parsed.get("student_name")
-        parsed["lrn"] = parsed.get("lrn")
-        parsed["score"] = score
-        parsed["total"] = total
-        parsed["errors"] = str(parsed.get("errors") or "")
+        text_response = res_data['candidates'][0]['content']['parts'][0]['text']
+        match = re.search(r'\{.*\}', text_response, re.DOTALL)
+        parsed = json.loads(match.group(0) if match else text_response)
         parsed["success"] = True
-
         return parsed
 
     except Exception as e:
-        # Keep the error readable in the Flask flash message.
-        return {
-            "success": False,
-            "error": f"Gemini SDK error: {str(e)}"
-        }
+        return {"success": False, "error": str(e)}
 
 # ---------------------------------------------------------
 # HTML STYLES & TEMPLATES
@@ -399,7 +324,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>HUSaYmetrics - Teacher Portal & Voice ECR</title>
+    <title>HusayMetrics by HUSaYSTEM - Teacher Portal & Voice ECR</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -407,7 +332,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
     <div class="sidebar-overlay" id="overlay" onclick="toggleSidebar()"></div>
     
     <div class="sidebar" id="sidebar">
-        <h3 style="margin-top:0; color: var(--cyan-glow);">YHELCHECKER AI</h3>
+        <h3 style="margin-top:0; color: var(--cyan-glow);">HusayMetrics by HUSaYSTEM</h3>
         <hr style="border-color: var(--card-border); margin-bottom: 20px;">
         <a href="#" onclick="switchTab('ecr-voice-tab')">🎙️ Electronic Class Record (Speech-to-Text)</a>
         <a href="#" onclick="switchTab('class-records')">📚 Class Records & Grading</a>
@@ -757,7 +682,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
         <div id="deped-engine" class="tab-content">
             <div class="glass-card">
                 <h3>📊 DepEd Order No. 8 Transmutation Grade Sheet</h3>
-                <p style="color: var(--text-muted); font-size: 12px;">Automated weights: Written Work (30%), Performance Tasks (50%), Quarterly Assessment (20%).</p>
+                <p style="color: var(--text-muted); font-size: 12px;">Automated weights: Written Work (30%), Performance Tasks (50%), Summative/Final Assessments (20%).</p>
                 <table>
                     <thead>
                         <tr>
@@ -765,7 +690,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
                             <th>Section</th>
                             <th>WW (30%)</th>
                             <th>PT (50%)</th>
-                            <th>QA (20%)</th>
+                            <th>Summative/Final (20%)</th>
                             <th>Weighted %</th>
                             <th>Transmuted Grade</th>
                         </tr>
@@ -868,7 +793,9 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
                             <select name="category" style="width:100%; margin-top:5px; padding:8px; background:rgba(0,0,0,0.4); color:white; border-radius:6px;">
                                 <option value="WW">Written Work (WW)</option>
                                 <option value="PT">Performance Task (PT)</option>
-                                <option value="QA">Quarterly Assessment (QA)</option>
+                                <option value="S1">Summative 1 (S1)</option>
+<option value="S2">Summative 2 (S2)</option>
+<option value="FINAL">Final</option>
                             </select>
                         </div>
                     </div>
@@ -898,8 +825,16 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
                             <input type="text" name="key_pt" value="{{ answer_keys.get(sec['name'] ~ '_PT', '') }}" placeholder="1.A 2.B 3.C..." style="width:100%; padding:6px; background:rgba(0,0,0,0.4); color:white; border-radius:6px; border:1px solid var(--card-border);">
                         </div>
                         <div>
-                            <label style="font-size: 10px; color: var(--text-muted);">QA KEY</label>
-                            <input type="text" name="key_qa" value="{{ answer_keys.get(sec['name'] ~ '_QA', '') }}" placeholder="1.A 2.B 3.C..." style="width:100%; padding:6px; background:rgba(0,0,0,0.4); color:white; border-radius:6px; border:1px solid var(--card-border);">
+                            <label style="font-size: 10px; color: var(--text-muted);">S1 KEY</label>
+                            <input type="text" name="key_s1" value="{{ answer_keys.get(sec['name'] ~ '_S1', '') }}" placeholder="1.A 2.B 3.C..." style="width:100%; padding:6px; background:rgba(0,0,0,0.4); color:white; border-radius:6px; border:1px solid var(--card-border);">
+                        </div>
+                        <div>
+                            <label style="font-size: 10px; color: var(--text-muted);">S2 KEY</label>
+                            <input type="text" name="key_s2" value="{{ answer_keys.get(sec['name'] ~ '_S2', '') }}" placeholder="1.A 2.B 3.C..." style="width:100%; padding:6px; background:rgba(0,0,0,0.4); color:white; border-radius:6px; border:1px solid var(--card-border);">
+                        </div>
+                        <div>
+                            <label style="font-size: 10px; color: var(--text-muted);">FINAL KEY</label>
+                            <input type="text" name="key_final" value="{{ answer_keys.get(sec['name'] ~ '_FINAL', '') }}" placeholder="1.A 2.B 3.C..." style="width:100%; padding:6px; background:rgba(0,0,0,0.4); color:white; border-radius:6px; border:1px solid var(--card-border);">
                         </div>
                         <button type="submit" class="btn btn-green" style="padding: 8px 15px;">SAVE KEYS</button>
                     </form>
@@ -1084,7 +1019,7 @@ TEACHER_DASHBOARD_HTML = COMMON_STYLE + '''
 STUDENT_PORTAL_HTML = COMMON_STYLE + '''
 <!DOCTYPE html>
 <html>
-<head><title>Student Portal - ESP32 Offline Access</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<head><title>HUSaYSTEM | HusayMetrics - Student Portal</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body style="display:flex; justify-content:center; align-items:center; min-height:100vh; padding: 20px 0; box-sizing: border-box;">
     <div style="max-width:480px; width:100%;">
         {% with messages = get_flashed_messages() %}
@@ -1096,7 +1031,7 @@ STUDENT_PORTAL_HTML = COMMON_STYLE + '''
         {% endwith %}
 
         <div class="glass-card" style="text-align:center;">
-            <h2 style="color:var(--cyan-glow); margin-top:0;">Student Grade Portal</h2>
+            <div style="font-size:11px; letter-spacing:1px; color:var(--text-muted); margin-bottom:5px;">HUSaYSTEM</div><h2 style="color:var(--cyan-glow); margin-top:0;">HusayMetrics Student Portal</h2>
             <p style="font-size:13px; color:var(--text-muted);">Enter your 8-character Secret Token or scan your QR Code to view your Report Card.</p>
             <form action="/student/view" method="POST" style="margin-top:15px;">
                 <input type="text" name="token" placeholder="e.g. A1B2C3D4" required style="width:90%; font-size:20px; text-align:center; text-transform:uppercase; margin-bottom:15px; letter-spacing:3px; background:rgba(0,0,0,0.4); border:1px solid var(--card-border); color:#fff; padding:10px; border-radius:6px;">
@@ -1129,7 +1064,9 @@ STUDENT_PORTAL_HTML = COMMON_STYLE + '''
                     <select name="category" required style="width:100%; padding:8px; background:rgba(0,0,0,0.4); border:1px solid var(--card-border); color:#fff; border-radius:6px; box-sizing:border-box;">
                         <option value="WW">Written Work (WW)</option>
                         <option value="PT">Performance Task (PT)</option>
-                        <option value="QA">Quarterly Assessment (QA)</option>
+                        <option value="S1">Summative 1 (S1)</option>
+<option value="S2">Summative 2 (S2)</option>
+<option value="FINAL">Final</option>
                     </select>
                 </div>
                 <div>
@@ -1574,11 +1511,13 @@ def save_key():
     section = request.form.get('section')
     key_ww = request.form.get('key_ww', '')
     key_pt = request.form.get('key_pt', '')
-    key_qa = request.form.get('key_qa', '')
+    key_s1 = request.form.get('key_s1', '')
+    key_s2 = request.form.get('key_s2', '')
+    key_final = request.form.get('key_final', '')
 
     with get_db() as conn:
         cursor = conn.cursor()
-        for cat, val in [('WW', key_ww), ('PT', key_pt), ('QA', key_qa)]:
+        for cat, val in [('WW', key_ww), ('PT', key_pt), ('S1', key_s1), ('S2', key_s2), ('FINAL', key_final)]:
             code = f"{section}_{cat}"
             cursor.execute('''
                 INSERT INTO answer_keys (section_cat, key_text) VALUES (?, ?)
@@ -1845,5 +1784,5 @@ def section_analytics():
 
 
 if __name__ == '__main__':
-    print("Starting YhelChecker AI & Voice ECR Server...")
+    print("Starting HusayMetrics by HUSaYSTEM Server...")
     app.run(debug=True, host='0.0.0.0', port=5000)

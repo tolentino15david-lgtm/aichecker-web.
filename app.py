@@ -105,6 +105,21 @@ def normalize_answer_key(key_str):
     cleaned = re.sub(r'[^a-zA-Z0-9\s]', '', key_str)
     return " ".join(cleaned.split())
 
+def get_answer_key_total(key_str):
+    """Automatically determine the number of items from the Master Answer Key."""
+    formatted = normalize_answer_key(key_str)
+    if not formatted:
+        return 0
+
+    # Numbered format: 1.A 2.B 3.C ... Use the highest item number.
+    numbered = re.findall(r'(?<!\d)(\d+)\s*[A-Da-d](?![A-Za-z])', formatted)
+    if numbered:
+        return max(int(n) for n in numbered)
+
+    # Plain format: A B C D A B ...
+    plain = re.findall(r'(?<![A-Za-z])[A-Da-d](?![A-Za-z])', formatted)
+    return len(plain)
+
 def get_or_create_student_token(name, lrn, section):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -201,6 +216,9 @@ def call_gemini_vision(image_path, answer_key):
         mime_type = "image/jpeg"
 
     formatted_key = normalize_answer_key(answer_key)
+    total_items = get_answer_key_total(answer_key)
+    if total_items <= 0:
+        return {"success": False, "error": "Hindi matukoy ang total items mula sa Master Answer Key."}
 
     try:
         with open(image_path, "rb") as img_file:
@@ -210,7 +228,7 @@ def call_gemini_vision(image_path, answer_key):
         
         prompt = f"""
         You are an advanced Optical Mark Recognition (OMR) and handwriting evaluator.
-        Compare the student's answers (either handwritten text or shaded A/B/C/D bubbles on a 60-item sheet) with this Master Answer Key:
+        Compare the student's answers with this Master Answer Key. The test contains EXACTLY {total_items} items. Do not read, grade, or report any item number above {total_items}.
         "{formatted_key}"
 
         Instructions:
@@ -224,7 +242,7 @@ def call_gemini_vision(image_path, answer_key):
             "student_name": "<Extracted Name or null>",
             "lrn": "<Extracted LRN or null>",
             "score": <integer score>,
-            "total": 60,
+            "total": {total_items},
             "errors": "<comma-separated wrong item numbers>"
         }}
         """
@@ -1462,8 +1480,12 @@ def teacher_ai_check(section_name):
             ext_name = ai_res.get("student_name") or sub['student_name']
             ext_lrn = ai_res.get("lrn") or sub['lrn']
             score = int(ai_res.get("score", 0))
-            total = int(ai_res.get("total", 60))
-            errors = str(ai_res.get("errors", ""))
+            # Master Answer Key is always the source of truth for the total.
+            total = get_answer_key_total(answer_key)
+            score = max(0, min(score, total))
+            raw_errors = str(ai_res.get("errors", ""))
+            error_nums = [int(n) for n in re.findall(r'\d+', raw_errors) if 1 <= int(n) <= total]
+            errors = ", ".join(map(str, error_nums))
 
             token = get_or_create_student_token(ext_name, ext_lrn, section_name)
 
@@ -1523,6 +1545,18 @@ def save_key():
                 INSERT INTO answer_keys (section_cat, key_text) VALUES (?, ?)
                 ON CONFLICT(section_cat) DO UPDATE SET key_text = excluded.key_text
             ''', (code, val))
+
+            # Master Answer Key is the source of truth for test length.
+            # Existing graded papers are queued for re-check when a key exists,
+            # so their score/errors are recalculated using the current key.
+            total_items = get_answer_key_total(val)
+            if total_items > 0:
+                cursor.execute('''
+                    UPDATE submissions
+                    SET total_questions = ?,
+                        status = CASE WHEN status = 'Graded' THEN 'Pending' ELSE status END
+                    WHERE section = ? AND category = ?
+                ''', (total_items, section, cat))
         conn.commit()
 
     flash(f"✅ Na-save ang Answer Keys para sa {section}!")
@@ -1554,13 +1588,30 @@ def delete_section(sec_id):
 @app.route('/teacher/update-score/<int:sub_id>', methods=['POST'])
 def update_score(sub_id):
     score = request.form.get('score')
-    total = request.form.get('total')
     errors = request.form.get('errors')
 
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute('SELECT section, category FROM submissions WHERE id = ?', (sub_id,))
+        sub = cursor.fetchone()
+
+        total = None
+        if sub:
+            cursor.execute(
+                'SELECT key_text FROM answer_keys WHERE section_cat = ?',
+                (f"{sub['section']}_{sub['category']}",)
+            )
+            key_row = cursor.fetchone()
+            if key_row:
+                total = get_answer_key_total(key_row['key_text'])
+
+        # Fall back to the submitted total only if there is no valid Master Key.
+        if not total:
+            total = request.form.get('total') or 0
+
+        score = max(0, min(int(score or 0), int(total)))
         cursor.execute('''
-            UPDATE submissions 
+            UPDATE submissions
             SET score = ?, total_questions = ?, error_details = ?, status = 'Graded'
             WHERE id = ?
         ''', (score, total, errors, sub_id))
